@@ -1,0 +1,246 @@
+#!/bin/bash
+
+########################################
+#                                      #
+# script to load renegade under dosemu #
+#   finds open node and executes bbs   #
+#  todo : recognize and handle hangup  #
+#                                      #
+########################################
+
+
+
+export HOME=/home/bbs/
+export TERM=xterm
+export LANG=en_US.utf8
+pressed_escape=0
+SCRIPT_NAME=$0
+SCRIPT_BASENAME=$(basename $SCRIPT_NAME)
+HOSTNAME=$REMOTEHOST
+PID=$$
+
+LOG=/home/bbs/REN/LOGS/connect.$(date "+%W.%u")
+BBS_NAME="godta"
+SOFTWARE="Renegade v05.26.0/DOS (Compiled June 2, 2013) ..."
+MAINT=false
+total=9
+TEMP_BASE="/tmp/node."
+TEMP_DIR=$(dirname $TEMP_BASE)
+DISPLAY_ANSI=0
+ANSI_HEAD=""
+ANSI_MIDDLE=""
+ANSI_FOOTER=""
+WILL_BE_BACK="" # Will be back message during maintenance, date is probably a good idea.
+PAUSE_STRING=".oO Pause Oo."
+BBS_COMMAND="/usr/bin/dosemu.bin -t -f /home/bbs/scripts/config/bbs.conf D:\SCRIPTS\BAT\BBS.BAT $NODE $IP"
+
+current_sessions=$(ls $TEMP_BASE* 2> /dev/null|wc -l)
+UPTIME=$(uptime -p|sed s/up//)
+
+function message() 
+{
+	[[ -n $1 ]] && echo -ne "$1"
+}
+
+setup_xinetd()
+{
+	if [ $(whoami) != "root" ] ; then
+			message "\nRe-run this script as root\n\n"
+			message "sudo $(realpath -s $0) [port] [user]\n\n"
+			message "Where \n  [port] is the port you want telnet to listen on and \n  [user] is the user that will run telnetd\n\n"
+			exit
+	fi	
+
+	if [ -f /etc/os-release ]; then
+		RELEASE_ID=$(awk -F= '$1=="ID" { print $2 ;}' /etc/os-release)
+		RELEASE_NAME=$(awk -F= '$1=="NAME" { print $2 ;}' /etc/os-release)
+	else
+		message "Sorry, it looks like your os is not supported\n"
+		exit
+	fi
+	
+	if [ $RELEASE_ID != "ubuntu" ] || [ $RELEASE_ID != "debian" ]; then
+		message "$RELEASE_NAME is currently not supported at this time\n"
+		exit
+	else
+		apt-get install xinetd telnetd -y
+	fi
+	
+	if [ $# -ne 2 ]; then
+		message "$0 takes exactly 2 arguments - \n"
+		message "$0 [port] [user] \n"
+		exit
+	fi
+	
+	CURRENT_PATH=$(realpath -P .)
+	SCRIPT_REPLACEMENT=$(realpath -P $0)
+	
+	PORT=$1
+	USER=$2
+	cp "$CURRENT_PATH/telnet.dist" "$CURRENT_PATH/telnet"
+	
+	sed -i s:__SCRIPT_NAME__:$SCRIPT_REPLACEMENT: "$CURRENT_PATH/telnet"
+	sed -i s:__PORT__:$PORT: "$CURRENT_PATH/telnet"
+	sed -i s:__USER__:$USER: "$CURRENT_PATH/telnet"
+	
+	cp $SCRIPT_REPLACEMENT /etc/xinet.d/telnet
+	systemctl restart xinetd
+	exit
+}	
+
+if [ $SCRIPT_BASENAME == "setup_xinetd" ] ; then
+	setup_xinetd $1 $2
+	exit
+fi
+
+function pause()
+{
+	if [ ! -n $1 ]; then
+		PAUSE_STRING=$1
+	fi
+	echo -ne "$PAUSE_STRING" && read -N1 -s
+	echo -e "[1K[1F"
+	# could also be read -N1 -s -p $PAUSE_STRING
+}
+
+function is_ip()
+{	
+	local ip=$1
+	local is_ip=0;
+	if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+		is_ip=1
+	fi
+	return $is_ip
+}
+
+function readEscape() {
+	read -N2 -r -s -p "  Press [ESC] twice to continue ..." ESCAPE
+	
+	if [ "$ESCAPE" == "" ]
+	then
+		pressed_escape=1
+	else
+	echo -e "[1K[1F"
+		pressed_escape=0
+	fi
+}
+
+function log() {
+	
+	LOG=/home/bbs/REN/LOGS/conn$(date +%j).log
+	SYSOP_LOG=/home/bbs/REN/LOGS/sysop.log
+	
+	MESSAGE=$1
+			
+	DATE=$(date "+%x")
+	TIME=$(date "+%I:%M.%S%P")	
+	
+	echo -e "\n|03[|11$NODE|03]|15:|03[|11$DATE|03]|15:|03[|11$TIME|03]|15: |07$MESSAGE\n" >> $SYSOP_LOG
+	echo "[$NODE]:[$DATE]:[$TIME]: $MESSAGE" >> $LOG
+
+}
+
+function message() 
+{
+	[[ -n $1 ]] && echo -ne "$1"
+}
+
+if [ $MAINT == true ] ; then
+message "\n\nConnection from $HOSTNAME ...\n";
+message "Sorry $BBS_NAME is under maintenance.  Please call back later.\n";
+
+[[ -n $WILL_BE_BACK ]] && echo -e "$WILL_BE_BACK"
+
+exit;
+fi
+
+
+
+if [ $current_sessions -eq $total ]; then
+	log "---"
+	log "Connection from $HOSTNAME" 
+	log "Connection refused : To many connections"
+	message "[2J"
+	message "\n  Too many connections, please try again later. \n"
+	sleep 2
+	message "  Goodbye."
+
+	log "Disconnected : $HOSTNAME"
+
+	exit
+else
+
+	NODE=1
+	for i in `seq 1 $total` ; do
+		if [ ! -f "$TEMP_BASE$i" ] 
+		then
+			log "---"
+			log "Connection to from $HOSTNAME"
+			let NODE=$i
+			echo $PID > $TEMP_BASE$i
+			
+			break
+		fi
+	done
+
+	trap "rm -rf $TEMP_BASE$NODE; exit" SIGHUP SIGINT SIGQUIT SIGABRT SIGURG SIGPIPE SIGQUIT SIGKILL SIGTERM
+	
+	if [[ $DISPLAY_ANSI -eq 1 ]];
+	then
+	log "Displaying intro ansi"
+	clear
+	[[ -n $ANSI_HEAD ]] && cat $ANSI_HEAD
+	[[ -n $ANSI_MIDDLE ]] && cat $ANSI_MIDDLE
+	[[ -n $ANSI_FOOTER ]] && cat $ANSI_FOOTER
+	pause
+	fi
+
+	message "[2J"
+	message "\n  connected to $BBS_NAME on node $NODE of $total\n"
+	message "  from host name $HOSTNAME ... \n"
+	sleep 1
+	message "  resolving hostname ... "
+	sleep 1
+
+	is_ip $HOSTNAME
+	if [[ $? -eq 1 ]]; then
+		IP=$HOSTNAME
+	else 
+		IP=$(host -4 $HOSTNAME|awk '/has.*address/{print $NF; exit;}')
+	fi
+
+	if [ -z $IP ] ;
+	then
+		IP="169.254.0.$NODE"
+	fi
+
+	message "  using IP ... $IP\n"
+	message "  logged on `date '+%A %B %d, %Y %I:%M %P'`\n"
+	message "  $BBS_NAME has been up continually for $UPTIME\n\n"
+	message "  welcome.\n\n"
+
+	while [ $pressed_escape -ne 1 ]
+	do
+		readEscape
+	done
+	   
+	message "\n\n  Loading $SOFTWARE \n\n" 
+	message "  "
+
+	sleep 2
+
+	log "Loading bbs ... "
+
+	$BBS_COMMAND
+
+	message "\n  node $NODE disconnected ...\n\n"
+
+	log "Disconnected from $HOSTNAME"
+			rm -rf $TEMP_BASE$NODE
+
+	log "Removed $TEMP_BASE$NODE"
+	log "Node waiting ..." 
+
+	exit
+
+fi
